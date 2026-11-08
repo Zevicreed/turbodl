@@ -1,1 +1,1 @@
-{"notes":"Barras de progreso visibles (la principal sigue sola a la descarga activa y cada fila lleva la suya), icono propio en la ventana y estreno del botón de actualización automática.","version":"1.3.5"}
+{"notes":"El botón «Descargar con TurboDL» ahora aparece SOBRE el reproductor, como en IDM: el reproductor de Cuevana vive en un iframe y el botón no nacía ahí. Tras actualizar, recarga la extensión una vez con el botón de recargar en chrome://extensions (o reinicia Chrome).","version":"1.3.6"}

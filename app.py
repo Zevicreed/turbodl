@@ -18,7 +18,7 @@ from engine import SegmentedDownloader, probe, format_bytes, format_eta  # noqa:
 import video as videomod  # noqa: E402
 from server import serve_in_thread, PORT as EXT_PORT  # noqa: E402
 
-APP_VERSION = "1.3.5"
+APP_VERSION = "1.3.6"
 try:
     import updater as updatermod
 except Exception:  # noqa: BLE001 — sin módulo de actualización, la app sigue

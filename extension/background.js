@@ -83,7 +83,9 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     } else if (msg.type === "tdl-main") {
       // El stream principal: el del <video> si se conoce; si no, el mejor cazado.
       const tab = sender.tab || (await chrome.tabs.get(tabId).catch(() => null));
-      let item = msg.src ? { url: msg.src, title: msg.title } : null;
+      // El título bueno es el de la PESTAÑA (el episodio); el título del
+      // marco del reproductor suele ser basura del sitio de embeds.
+      let item = msg.src ? { url: msg.src, title: (tab && tab.title) || msg.title } : null;
       if (!item) {
         const m = await restore(tabId);
         const items = [...m.values()];
