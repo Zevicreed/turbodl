@@ -407,7 +407,10 @@ def repair_to(src, dst, deep=False):
     """Reempaqueta src en dst y comprueba que dst sí promete lo que dice.
     Si el archivo trae una cabecera disfrazada delante de un MPEG-TS (el
     truco de Cuevana), ffmpeg se atraganta con el disfraz: primero se
-    recorta el disfraz a un temporal limpio y se reempaqueta ese."""
+    recorta el disfraz a un temporal limpio y se reempaqueta ese.
+    Si todo falla, dst NO queda en disco: una copia «(reparado)» vacía
+    engaña al usuario y bloquearía los intentos futuros."""
+    ok = False
     if sniff_kind(src) == "ts-disfrazado":
         import shutil
         off = _ts_offset(src)
@@ -417,18 +420,22 @@ def repair_to(src, dst, deep=False):
                 with open(src, "rb") as fin, open(tmp_clean, "wb") as fout:
                     fin.seek(off)
                     shutil.copyfileobj(fin, fout, 1024 * 1024)
-                if remux_copy(tmp_clean, dst) and _dst_valid(dst):
-                    return True
+                ok = bool(remux_copy(tmp_clean, dst)) and _dst_valid(dst)
             except OSError:
-                pass
+                ok = False
             finally:
                 try:
                     os.remove(tmp_clean)
                 except OSError:
                     pass
-    if not remux_copy(src, dst, deep=deep):
-        return False
-    return _dst_valid(dst)
+    if not ok:
+        ok = bool(remux_copy(src, dst, deep=deep)) and _dst_valid(dst)
+    if not ok:
+        try:
+            os.remove(dst)
+        except OSError:
+            pass
+    return ok
 
 
 def ensure_playable(path):
@@ -496,7 +503,20 @@ def scan_and_repair_folder(outdir):
         except OSError:
             size = "?"
         base, ext = os.path.splitext(name)
-        has_copy = any(n.startswith(base + " (reparado") for n in names)
+        # «Ya reparado» solo si la copia existe Y es un video válido: una
+        # cáscara vacía de un intento fallido se borra y se reintenta.
+        has_copy = False
+        for n in names:
+            if n.startswith(base + " (reparado"):
+                sib = os.path.join(outdir, n)
+                sinfo = probe_media(sib)
+                if sinfo and sinfo["duration"] > 0 and container_matches(sib, sinfo):
+                    has_copy = True
+                else:
+                    try:
+                        os.remove(sib)
+                    except OSError:
+                        pass
         info = probe_media(path)
         valid = info is not None and info["duration"] > 0 and (info["vcodec"] or info["acodec"])
         if valid and container_matches(path, info):

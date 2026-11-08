@@ -18,7 +18,7 @@ from engine import SegmentedDownloader, probe, format_bytes, format_eta  # noqa:
 import video as videomod  # noqa: E402
 from server import serve_in_thread, PORT as EXT_PORT  # noqa: E402
 
-APP_VERSION = "1.3.9"
+APP_VERSION = "1.3.10"
 try:
     import updater as updatermod
 except Exception:  # noqa: BLE001 — sin módulo de actualización, la app sigue
@@ -41,6 +41,7 @@ class TurboApp(tk.Tk):
         self.geometry("880x540")
         self.minsize(760, 460)
         self.downloads = {}   # iid -> {"dl": obj, "prog": dict, "kind": "file"|"video"}
+        self._validated = set()   # descargas directas ya pasadas por el inspector
         self._counter = 0
         self.ui_queue = queue.Queue()  # los hilos trabajadores piden acciones de UI por aquí
         self._cfg = self._load_cfg()
@@ -145,6 +146,7 @@ class TurboApp(tk.Tk):
             self.tree.heading(col, text=txt)
             self.tree.column(col, width=w, stretch=(col == "nombre"))
         self.tree.pack(side="left", fill="both", expand=True)
+        self.tree.bind("<<TreeviewSelect>>", self._on_select)
         sb = ttk.Scrollbar(mid, orient="vertical", command=self.tree.yview)
         sb.pack(side="right", fill="y")
         self.tree.configure(yscrollcommand=sb.set)
@@ -263,6 +265,48 @@ class TurboApp(tk.Tk):
     def _selected(self):
         sel = self.tree.selection()
         return sel[0] if sel else None
+
+    def _on_select(self, _evt=None):
+        """Al elegir una fila, la barra de estado muestra su detalle COMPLETO:
+        en la lista el error se recorta a 40 caracteres y no se podía leer."""
+        iid = self._selected()
+        if not iid:
+            return
+        item = self.downloads.get(iid)
+        if not item:
+            return
+        vals = self.tree.item(iid, "values")
+        name = vals[0] if vals else iid
+        p = item["prog"]
+        if item.get("post_error"):
+            self.status.set(f"{name} — Error completo: {item['post_error']}")
+        elif p.get("state") == "error" and p.get("error"):
+            self.status.set(f"{name} — Error completo: {p['error']}")
+        elif item.get("post_note"):
+            self.status.set(f"{name} — {item['post_note']}: el archivo venía en un "
+                            "contenedor que VLC rechaza y se convirtió a MP4 estándar.")
+        else:
+            self.status.set(f"{name} — {self._STATE_TXT.get(p.get('state', 'idle'), '')}")
+
+    def _validate_file_job(self, iid, path):
+        """Las descargas directas (motor segmentado) no pasan por yt-dlp:
+        su contenedor se comprueba — y se convierte si hace falta — aquí,
+        para que ninguna «Completada» sea un video que VLC no abre."""
+        verdict, detail = videomod.ensure_playable(path)
+
+        def apply():
+            item = self.downloads.get(iid)
+            if not item:
+                return
+            if verdict == "repaired":
+                item["post_note"] = "Completada (convertida a MP4)"
+                self.status.set(f"{os.path.basename(path)}: venía en un contenedor que "
+                                "VLC rechaza; quedó convertido a MP4 estándar.")
+            elif verdict in ("invalid", "bad"):
+                item["post_error"] = detail
+                self.status.set(f"{os.path.basename(path)}: {detail}")
+
+        self._ui(apply)
 
     def _ctl(self, action):
         iid = self._selected()
@@ -531,6 +575,17 @@ class TurboApp(tk.Tk):
             if item["kind"] == "file" and dl.state != p.get("state"):
                 p.update({"state": dl.state, "downloaded": dl.downloaded, "total": dl.total,
                           "speed": dl.speed, "eta": dl.eta(), "error": dl.error})
+            if item.get("post_error"):
+                p.update({"state": "error", "error": item["post_error"]})
+            # Las descargas directas también pasan por el inspector al terminar:
+            # si el video venía en un contenedor que VLC rechaza, se convierte.
+            if (item["kind"] == "file" and p.get("state") == "done"
+                    and iid not in self._validated
+                    and os.path.splitext(getattr(dl, "dest", "") or "")[1].lower()
+                    in videomod.VIDEO_EXTS):
+                self._validated.add(iid)
+                threading.Thread(target=self._validate_file_job,
+                                 args=(iid, dl.dest), daemon=True).start()
             total = p.get("total")
             down = p.get("downloaded") or 0
             pct = (down / total * 100) if total else 0
@@ -538,6 +593,8 @@ class TurboApp(tk.Tk):
             txt = self._STATE_TXT.get(state, state)
             if state == "error" and p.get("error"):
                 txt = "Error: " + str(p["error"])[:40]
+            if state == "done" and item.get("post_note"):
+                txt = item["post_note"]
             vals = list(self.tree.item(iid, "values"))
             if vals:
                 vals[1] = format_bytes(total)
