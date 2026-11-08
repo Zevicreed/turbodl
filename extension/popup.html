@@ -1,0 +1,27 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <header>
+    <div class="logo">Turbo<b>DL</b></div>
+    <div id="conn" class="conn">comprobando…</div>
+  </header>
+
+  <button id="sendPage" class="primary">Enviar esta página a TurboDL</button>
+  <p class="hint">Para YouTube y páginas de video: TurboDL lo analiza con yt-dlp.</p>
+
+  <div class="sep"></div>
+  <div class="row-between">
+    <h2>Streams cazados en esta pestaña</h2>
+    <button id="clear" class="ghost">Limpiar</button>
+  </div>
+  <div id="list"></div>
+  <p id="empty" class="hint">Nada todavía. Dale <b>play</b> al video unos segundos: el stream aparece aquí en cuanto el reproductor lo pide.</p>
+
+  <div id="status"></div>
+  <script src="popup.js"></script>
+</body>
+</html>
