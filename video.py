@@ -153,30 +153,182 @@ def find_ffmpeg():
     return shutil.which("ffmpeg")
 
 
-def validate_media(path):
-    """True si ffprobe confirma que el archivo es un medio reproducible."""
+def _find_ffprobe():
+    ffmpeg = find_ffmpeg()
+    if not ffmpeg:
+        return None
+    probe = os.path.join(os.path.dirname(ffmpeg), "ffprobe.exe" if ffmpeg.endswith(".exe") else "ffprobe")
+    if os.path.exists(probe):
+        return probe
+    import shutil
+    return shutil.which("ffprobe")
+
+
+def probe_media(path):
+    """Retrato del archivo según ffprobe: contenedor REAL, duración y codecs.
+    None si no se puede inspeccionar (sin ffprobe o archivo ilegible)."""
     import json
     import subprocess
-    ffmpeg = find_ffmpeg()
-    if not ffmpeg or not path or not os.path.exists(path):
-        return None  # sin ffprobe no se puede juzgar: no condenar el archivo
-    probe = os.path.join(os.path.dirname(ffmpeg), "ffprobe.exe" if ffmpeg.endswith(".exe") else "ffprobe")
-    if not os.path.exists(probe):
-        import shutil
-        probe = shutil.which("ffprobe")
-    if not probe:
+    probe = _find_ffprobe()
+    if not probe or not path or not os.path.exists(path):
         return None
     try:
         r = subprocess.run(
-            [probe, "-v", "error", "-show_entries", "format=duration",
-             "-show_entries", "stream=codec_type", "-of", "json", path],
+            [probe, "-v", "error", "-show_entries", "format=format_name,duration",
+             "-show_entries", "stream=codec_type,codec_name", "-of", "json", path],
             capture_output=True, text=True, timeout=60,
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
         data = json.loads(r.stdout or "{}")
-        dur = float((data.get("format") or {}).get("duration") or 0)
-        return dur > 0 and bool(data.get("streams"))
     except Exception:  # noqa: BLE001
-        return None
+        return None  # ffprobe no corrió: no se puede juzgar (distinto de «no es medio»)
+    fmt = (data.get("format") or {}).get("format_name") or ""
+    try:
+        dur = float((data.get("format") or {}).get("duration") or 0)
+    except (TypeError, ValueError):
+        dur = 0
+    vcodec = acodec = None
+    for s in data.get("streams") or []:
+        if s.get("codec_type") == "video" and not vcodec:
+            vcodec = s.get("codec_name")
+        elif s.get("codec_type") == "audio" and not acodec:
+            acodec = s.get("codec_name")
+    # ffprobe SÍ corrió y no encontró nada: el dict vacío ES el veredicto
+    # («esto no es un medio»), no «no se puede juzgar».
+    return {"format": fmt, "duration": dur, "vcodec": vcodec, "acodec": acodec}
+
+
+def validate_media(path):
+    """True si ffprobe confirma que el archivo es un medio reproducible."""
+    info = probe_media(path)
+    if info is None:
+        return None  # sin ffprobe no se puede juzgar: no condenar el archivo
+    return info["duration"] > 0 and bool(info["vcodec"] or info["acodec"])
+
+
+# Familias de contenedor que ffprobe reporta para cada extensión. El pecado
+# clásico de los streams: contenido MPEG-TS guardado con nombre .mp4 —
+# ffprobe lo lee sin problema (por eso la validación vieja lo dejaba pasar),
+# pero VLC lo RECHAZA; el reproductor de Windows lo tolera.
+_FAMILIES = {
+    ".mp4": {"mov", "mp4", "m4a", "3gp", "3g2", "mj2"},
+    ".m4v": {"mov", "mp4", "m4a", "3gp", "3g2", "mj2"},
+    ".mov": {"mov", "mp4", "m4a", "3gp", "3g2", "mj2"},
+    ".mkv": {"matroska", "webm"},
+    ".webm": {"matroska", "webm"},
+    ".mp3": {"mp3"},
+    ".m4a": {"mov", "mp4", "m4a", "3gp", "3g2", "mj2"},
+    ".ts": {"mpegts"},
+    ".avi": {"avi"},
+}
+
+
+def container_matches(path, info):
+    """True si el contenedor REAL del archivo es el que su extensión promete."""
+    fam = _FAMILIES.get(os.path.splitext(path)[1].lower())
+    if fam is None or not info:
+        return True  # extensión que no juzgamos: no condenar
+    return bool(set((info.get("format") or "").split(",")) & fam)
+
+
+def remux_copy(src, dst):
+    """Reempaqueta el medio en el contenedor de `dst` SIN recodificar
+    (copia de streams: rápido, no pierde calidad). True si dst quedó válido."""
+    import subprocess
+    ffmpeg = find_ffmpeg()
+    if not ffmpeg:
+        return False
+    args = [ffmpeg, "-y", "-v", "error", "-i", src, "-c", "copy"]
+    if dst.lower().endswith((".mp4", ".m4v", ".mov")):
+        args += ["-movflags", "+faststart"]
+    args.append(dst)
+    try:
+        subprocess.run(args, capture_output=True, timeout=1800,
+                       creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    except Exception:  # noqa: BLE001
+        return False
+    return os.path.exists(dst) and os.path.getsize(dst) > 0
+
+
+def repair_to(src, dst):
+    """Reempaqueta src en dst y comprueba que dst sí promete lo que dice."""
+    if not remux_copy(src, dst):
+        return False
+    info = probe_media(dst)
+    if info and info["duration"] > 0 and container_matches(dst, info):
+        return True
+    try:
+        os.remove(dst)
+    except OSError:
+        pass
+    return False
+
+
+def ensure_playable(path):
+    """Veredicto sobre un archivo recién descargado:
+    ("ok") el contenedor es el correcto · ("repaired") venía disfrazado
+    (p. ej. MPEG-TS con nombre .mp4) y se convirtió en el sitio ·
+    ("invalid") no es un medio válido · ("bad") el contenedor es otro y la
+    conversión automática falló · ("unknown") no se pudo inspeccionar."""
+    info = probe_media(path)
+    if info is None:
+        return ("unknown", "")
+    if not (info["duration"] > 0 and (info["vcodec"] or info["acodec"])):
+        return ("invalid", "El archivo bajó pero NO es un video válido: el servidor "
+                            "entregó un stream defectuoso. Prueba otra calidad u otro enlace.")
+    if container_matches(path, info):
+        return ("ok", "")
+    ext = os.path.splitext(path)[1]
+    tmp = path + ".turbodl-fixed" + ext
+    if repair_to(path, tmp):
+        os.replace(tmp, path)
+        return ("repaired", "")
+    return ("bad", f"El archivo bajó en un contenedor ({info['format']}) que reproductores "
+                    f"como VLC rechazan en un archivo «{ext}», y la conversión automática "
+                    "falló. Ábrelo con el reproductor de Windows o repáralo desde la carpeta "
+                    "con el botón «Reparar carpeta» tras actualizar.")
+
+
+VIDEO_EXTS = (".mp4", ".m4v", ".mov", ".mkv", ".webm", ".avi", ".ts")
+
+
+def scan_and_repair_folder(outdir):
+    """Revisa los videos de una carpeta y reempaqueta los que llevan un
+    contenedor disfrazado (copia «(reparado)» junto al original, que no se
+    toca). Devuelve el reporte para mostrarlo en la app."""
+    report = {"ok": 0, "repaired": [], "broken": [], "failed": [], "codec_watch": [], "already": []}
+    try:
+        names = sorted(os.listdir(outdir))
+    except OSError:
+        return report
+    for name in names:
+        if ".turbodl" in name or name.endswith(".part") or " (reparado)" in name:
+            continue
+        if os.path.splitext(name)[1].lower() not in VIDEO_EXTS:
+            continue
+        path = os.path.join(outdir, name)
+        info = probe_media(path)
+        if info is None or not (info["duration"] > 0 and (info["vcodec"] or info["acodec"])):
+            report["broken"].append(name)
+            continue
+        if container_matches(path, info):
+            report["ok"] += 1
+            if info["vcodec"] in ("av1", "vp9"):
+                report["codec_watch"].append(name)
+            continue
+        base, ext = os.path.splitext(name)
+        if any(n.startswith(base + " (reparado") for n in names):
+            report["already"].append(name)  # ya tiene su copia sana: no duplicar
+            continue
+        dst = os.path.join(outdir, base + " (reparado)" + ext)
+        i = 2
+        while os.path.exists(dst):
+            dst = os.path.join(outdir, f"{base} (reparado {i}){ext}")
+            i += 1
+        if repair_to(path, dst):
+            report["repaired"].append(os.path.basename(dst))
+        else:
+            report["failed"].append(name)
+    return report
 
 
 class VideoDownloader:
@@ -302,13 +454,17 @@ class VideoDownloader:
                     self.state = "error"
                     self.error = ("El archivo de destino ya existía antes de esta descarga "
                                   "y no se bajó nada nuevo. Borra el archivo viejo y reintenta.")
-                # Nunca decir «Completada» sin comprobar que el archivo sirve.
-                elif validate_media(self.final_path) is False:
-                    self.state = "error"
-                    self.error = ("El archivo bajó pero NO es un video válido: el servidor "
-                                  "entregó un stream defectuoso. Prueba otra calidad u otro enlace.")
+                # Nunca decir «Completada» sin comprobar que el archivo sirve
+                # Y que su contenedor es el que promete su nombre: un MPEG-TS
+                # disfrazado de .mp4 hay reproductores (VLC) que lo rechazan.
+                # Si viene disfrazado, se convierte en el sitio automáticamente.
                 else:
-                    self.state = "done"
+                    verdict, detail = ensure_playable(self.final_path)
+                    if verdict in ("invalid", "bad"):
+                        self.state = "error"
+                        self.error = detail
+                    else:
+                        self.state = "done"
         except Exception as e:  # noqa: BLE001
             if self.state not in ("cancelled", "paused"):
                 self.state = "error"

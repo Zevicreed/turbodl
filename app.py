@@ -18,7 +18,7 @@ from engine import SegmentedDownloader, probe, format_bytes, format_eta  # noqa:
 import video as videomod  # noqa: E402
 from server import serve_in_thread, PORT as EXT_PORT  # noqa: E402
 
-APP_VERSION = "1.3.6"
+APP_VERSION = "1.3.7"
 try:
     import updater as updatermod
 except Exception:  # noqa: BLE001 — sin módulo de actualización, la app sigue
@@ -153,6 +153,7 @@ class TurboApp(tk.Tk):
         ttk.Button(btns, text="Reanudar", command=lambda: self._ctl("start")).pack(side="left", padx=3)
         ttk.Button(btns, text="Cancelar", command=lambda: self._ctl("cancel")).pack(side="left", padx=3)
         ttk.Button(btns, text="Quitar de la lista", command=self._remove).pack(side="left", padx=3)
+        ttk.Button(btns, text="Reparar carpeta", command=self._repair_dir).pack(side="left", padx=3)
         ttk.Button(btns, text="Abrir carpeta", command=self._open_dir).pack(side="right", padx=3)
         # Botón de actualización: creado pero NO empaquetado; aparece solo
         # cuando el chequeo de arranque encuentra una versión más nueva.
@@ -293,6 +294,46 @@ class TurboApp(tk.Tk):
         if item and item["dl"].state in ("downloading", "merging"):
             item["dl"].cancel()
         self.tree.delete(iid)
+
+    # ---------------- reparación de videos ----------------
+    def _repair_dir(self):
+        outdir = self.dir_var.get()
+        if not outdir or not os.path.isdir(outdir):
+            self.status.set("La carpeta de destino no existe.")
+            return
+        self.status.set("Revisando los videos de la carpeta… (los grandes tardan un poco)")
+        threading.Thread(target=self._repair_dir_run, args=(outdir,), daemon=True).start()
+
+    def _repair_dir_run(self, outdir):
+        report = videomod.scan_and_repair_folder(outdir)
+        self._ui(lambda: self._repair_report(report))
+
+    def _repair_report(self, report):
+        from tkinter import messagebox
+        lines = []
+        if report["repaired"]:
+            lines.append("Reparados (copia nueva junto al original, que no se toca):")
+            lines += [f"  • {n}" for n in report["repaired"]]
+        if report["failed"]:
+            lines.append("No se pudieron reparar:")
+            lines += [f"  • {n}" for n in report["failed"]]
+        if report["broken"]:
+            lines.append("No son videos válidos (la descarga vino defectuosa):")
+            lines += [f"  • {n}" for n in report["broken"]]
+        if report["codec_watch"]:
+            lines.append("Ojo: llevan codec AV1/VP9 — un VLC viejo puede fallar con estos:")
+            lines += [f"  • {n}" for n in report["codec_watch"]]
+        if report.get("already"):
+            lines.append("Ya tenían su copia «(reparado)» de un barrido anterior:")
+            lines += [f"  • {n}" for n in report["already"]]
+        head = (f"{report['ok']} video(s) ya estaban bien · "
+                f"{len(report['repaired'])} reparado(s) · "
+                f"{len(report['failed'])} sin arreglo · {len(report['broken'])} dañado(s).")
+        self.status.set("Reparación de carpeta: " + head)
+        messagebox.showinfo(
+            "Reparar carpeta",
+            head + ("\n\n" + "\n".join(lines) if lines
+                    else "\n\nNada que reparar: todo está en el contenedor que su nombre promete."))
 
     def _scan_resumables(self):
         """Al abrir, ofrece reanudar descargas con meta pendiente en la carpeta."""
