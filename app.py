@@ -18,7 +18,7 @@ from engine import SegmentedDownloader, probe, format_bytes, format_eta  # noqa:
 import video as videomod  # noqa: E402
 from server import serve_in_thread, PORT as EXT_PORT  # noqa: E402
 
-APP_VERSION = "1.3.10"
+APP_VERSION = "1.3.11"
 try:
     import updater as updatermod
 except Exception:  # noqa: BLE001 — sin módulo de actualización, la app sigue
@@ -209,14 +209,25 @@ class TurboApp(tk.Tk):
 
     def _analyze(self, url, outdir, segs):
         os.makedirs(outdir, exist_ok=True)
-        info = videomod.extract_info(url)
+        info, err = videomod.extract_info_full(url)
         if info:
             self._ui(lambda: self._video_dialog(url, info, outdir))
+            return
+        if videomod.is_video_page(url):
+            # JAMÁS bajar la página como si fuera un archivo: eso dejaba una
+            # fila «Completada» con un HTML inútil y tamaño «?».
+            self._ui(lambda: self.status.set(
+                f"Ese enlace es de un sitio de videos y no se pudo extraer el video: {err}"))
             return
         try:
             total, _, name = probe(url)
         except Exception as e:  # noqa: BLE001
             self._ui(lambda: self.status.set(f"No pude abrir ese enlace: {e}"))
+            return
+        if "." not in name:
+            self._ui(lambda: self.status.set(
+                "Ese enlace parece una página web, no un archivo: no bajé nada. "
+                "Si es un video de una página, dale play y captúralo con la extensión."))
             return
         dest = os.path.join(outdir, name)
         dl = SegmentedDownloader(url, dest, segments=segs)
@@ -521,6 +532,10 @@ class TurboApp(tk.Tk):
         except Exception as e:  # noqa: BLE001
             self._ui(lambda: self.status.set(f"La extensión envió un enlace que no abrió: {e}"))
             return
+        if "." not in name:
+            self._ui(lambda: self.status.set(
+                "La extensión envió un enlace que parece una página, no un archivo: no bajé nada."))
+            return
         dest = os.path.join(outdir, name)
         dl = SegmentedDownloader(url, dest, segments=segs, headers=headers)
         self._ui(lambda: self._register_download(
@@ -528,7 +543,7 @@ class TurboApp(tk.Tk):
             f"Desde la extensión: {name} ({format_bytes(total)}) con motor segmentado."))
 
     def _ext_page(self, url, outdir, segs=8):
-        info = videomod.extract_info(url)
+        info, err = videomod.extract_info_full(url)
         if info:
             opt = info["options"][0]
             dl = videomod.VideoDownloader(url, outdir, opt["format"],
@@ -537,6 +552,9 @@ class TurboApp(tk.Tk):
             self._ui(lambda: (self._register_download(
                 url, info["title"], dl, "video",
                 f"Página enviada por la extensión: {info['title']} ({opt['label']})."), dl.start()))
+        elif videomod.is_video_page(url):
+            self._ui(lambda: self.status.set(
+                f"La extensión envió una página de videos que no se pudo extraer: {err}"))
         else:
             self._ext_direct(url, {}, outdir, segs)
 

@@ -82,13 +82,32 @@ def _friendly_error(e):
     return t
 
 
-def extract_info(url):
-    """Devuelve dict con title, duration y opciones de calidad, o None si
-    la URL no es una página de video reconocible."""
+_VIDEO_HOSTS = ("youtube.com", "youtu.be", "tiktok.com", "vimeo.com",
+                "facebook.com", "instagram.com", "twitter.com", "x.com",
+                "dailymotion.com", "twitch.tv")
+
+
+def is_video_page(url):
+    """True si la URL es la página de un sitio de videos: jamás es un
+    archivo descargable tal cual, aunque el extractor falle."""
+    import urllib.parse
+    try:
+        host = urllib.parse.urlparse(url).netloc.lower()
+    except Exception:  # noqa: BLE001
+        return False
+    return any(host == h or host.endswith("." + h) for h in _VIDEO_HOSTS)
+
+
+def extract_info_full(url):
+    """(info, error): como extract_info, pero cuando el sitio no entrega el
+    video devuelve la CAUSA legible del último intento. Sin ella, la app no
+    distinguía «no es una página de video» de «YouTube nos bloqueó» y
+    terminaba bajando la página HTML como si fuera un archivo."""
     if not yt_dlp_available():
-        return None
+        return None, "yt-dlp no está instalado en el entorno de TurboDL."
     import yt_dlp
     info = None
+    last_exc = None
     for mode in _yt_modes(url):
         opts = {"quiet": True, "no_warnings": True, "noplaylist": True,
                 "skip_download": True, "logger": _QuietLogger()}
@@ -96,12 +115,15 @@ def extract_info(url):
         try:
             with yt_dlp.YoutubeDL(opts) as ydl:
                 info = ydl.extract_info(url, download=False)
-        except Exception:  # noqa: BLE001
+        except Exception as e:  # noqa: BLE001
             info = None
+            last_exc = e
         if info and info.get("formats"):
             break
     if not info:
-        return None
+        if last_exc is not None:
+            return None, _friendly_error(last_exc)
+        return None, "el sitio no entregó información del video."
     heights = sorted({f.get("height") for f in info.get("formats", [])
                       if f.get("height") and f.get("vcodec") not in (None, "none")}, reverse=True)
     options = []
@@ -114,7 +136,14 @@ def extract_info(url):
         "duration": info.get("duration"),
         "uploader": info.get("uploader"),
         "options": options,
-    }
+    }, ""
+
+
+def extract_info(url):
+    """Devuelve dict con title, duration y opciones de calidad, o None si
+    la URL no es una página de video reconocible."""
+    info, _ = extract_info_full(url)
+    return info
 
 
 def sanitize_name(name, maxlen=80):
