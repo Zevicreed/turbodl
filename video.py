@@ -174,7 +174,8 @@ def probe_media(path):
         return None
     try:
         r = subprocess.run(
-            [probe, "-v", "error", "-show_entries", "format=format_name,duration",
+            [probe, "-v", "error", "-probesize", "20000000", "-analyzeduration", "20000000",
+             "-show_entries", "format=format_name,duration",
              "-show_entries", "stream=codec_type,codec_name", "-of", "json", path],
             capture_output=True, text=True, timeout=60,
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
@@ -230,14 +231,71 @@ def container_matches(path, info):
     return bool(set((info.get("format") or "").split(",")) & fam)
 
 
-def remux_copy(src, dst):
+def probe_health():
+    """¿Responde ffprobe en esta máquina? (ok, detalle). Sin él no hay
+    veredictos: mejor decirlo que marcar archivos buenos como dañados."""
+    import subprocess
+    probe = _find_ffprobe()
+    if not probe:
+        return (False, "no se encontró ffprobe junto al programa ni en el PATH")
+    try:
+        r = subprocess.run([probe, "-version"], capture_output=True, text=True, timeout=30,
+                           creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        first = (r.stdout or "").splitlines()[0] if r.stdout else ""
+        if r.returncode == 0 and "ffprobe" in first:
+            return (True, first.strip())
+        return (False, f"ffprobe respondió raro (código {r.returncode}): {(r.stderr or '')[:120]}")
+    except Exception as e:  # noqa: BLE001
+        return (False, f"ffprobe no arrancó: {e}")
+
+
+def sniff_kind(path):
+    """Olfato de cabecera: qué parece el archivo por sus primeros bytes,
+    aunque ffprobe no lo abra. «ts» = MPEG-TS limpio; «ts-disfrazado» = hay
+    un TS íntegro tras una cabecera falsa (el truco del servidor de Cuevana:
+    una cabecera PNG delante del stream); «mp4» = familia ISO; None = ni idea."""
+    try:
+        with open(path, "rb") as f:
+            data = f.read(200000)
+    except OSError:
+        return None
+    if len(data) >= 12 and data[4:8] == b"ftyp":
+        return "mp4"
+    def ts_at(off):
+        return (off + 377 <= len(data) and data[off] == 0x47
+                and data[off + 188] == 0x47 and data[off + 376] == 0x47)
+    if ts_at(0):
+        return "ts"
+    for off in range(1, min(len(data) - 377, 100000)):
+        if data[off] == 0x47 and ts_at(off):
+            return "ts-disfrazado"
+    return None
+
+
+def _fmt_size(n):
+    try:
+        n = float(n)
+    except (TypeError, ValueError):
+        return "?"
+    for u in ("B", "KB", "MB", "GB"):
+        if n < 1024 or u == "GB":
+            return f"{n:.1f} {u}".replace(".0 ", " ")
+        n /= 1024
+
+
+def remux_copy(src, dst, deep=False):
     """Reempaqueta el medio en el contenedor de `dst` SIN recodificar
-    (copia de streams: rápido, no pierde calidad). True si dst quedó válido."""
+    (copia de streams: rápido, no pierde calidad). True si dst quedó válido.
+    deep=True: ffmpeg escarba hasta 100 MB buscando el medio real — para
+    archivos con cabecera disfrazada delante del stream."""
     import subprocess
     ffmpeg = find_ffmpeg()
     if not ffmpeg:
         return False
-    args = [ffmpeg, "-y", "-v", "error", "-i", src, "-c", "copy"]
+    args = [ffmpeg, "-y", "-v", "error"]
+    if deep:
+        args += ["-probesize", "100M", "-analyzeduration", "100M"]
+    args += ["-i", src, "-c", "copy"]
     if dst.lower().endswith((".mp4", ".m4v", ".mov")):
         args += ["-movflags", "+faststart"]
     args.append(dst)
@@ -249,10 +307,7 @@ def remux_copy(src, dst):
     return os.path.exists(dst) and os.path.getsize(dst) > 0
 
 
-def repair_to(src, dst):
-    """Reempaqueta src en dst y comprueba que dst sí promete lo que dice."""
-    if not remux_copy(src, dst):
-        return False
+def _dst_valid(dst):
     info = probe_media(dst)
     if info and info["duration"] > 0 and container_matches(dst, info):
         return True
@@ -261,6 +316,53 @@ def repair_to(src, dst):
     except OSError:
         pass
     return False
+
+
+def _ts_offset(path, limit=32000000):
+    """Offset donde empieza el MPEG-TS íntegro tras la cabecera disfrazada
+    (sincronía 0x47 cada 188 bytes), o None. Busca en un solo bloque."""
+    try:
+        with open(path, "rb") as f:
+            data = f.read(limit)
+    except OSError:
+        return None
+
+    def ts_at(off):
+        return (off + 377 <= len(data) and data[off] == 0x47
+                and data[off + 188] == 0x47 and data[off + 376] == 0x47)
+
+    for off in range(0, max(0, len(data) - 377)):
+        if data[off] == 0x47 and ts_at(off):
+            return off
+    return None
+
+
+def repair_to(src, dst, deep=False):
+    """Reempaqueta src en dst y comprueba que dst sí promete lo que dice.
+    Si el archivo trae una cabecera disfrazada delante de un MPEG-TS (el
+    truco de Cuevana), ffmpeg se atraganta con el disfraz: primero se
+    recorta el disfraz a un temporal limpio y se reempaqueta ese."""
+    if sniff_kind(src) == "ts-disfrazado":
+        import shutil
+        off = _ts_offset(src)
+        tmp_clean = src + ".turbodl-clean.ts"
+        if off:
+            try:
+                with open(src, "rb") as fin, open(tmp_clean, "wb") as fout:
+                    fin.seek(off)
+                    shutil.copyfileobj(fin, fout, 1024 * 1024)
+                if remux_copy(tmp_clean, dst) and _dst_valid(dst):
+                    return True
+            except OSError:
+                pass
+            finally:
+                try:
+                    os.remove(tmp_clean)
+                except OSError:
+                    pass
+    if not remux_copy(src, dst, deep=deep):
+        return False
+    return _dst_valid(dst)
 
 
 def ensure_playable(path):
@@ -291,11 +393,28 @@ def ensure_playable(path):
 VIDEO_EXTS = (".mp4", ".m4v", ".mov", ".mkv", ".webm", ".avi", ".ts")
 
 
+def _repaired_dst(outdir, name):
+    base, ext = os.path.splitext(name)
+    dst = os.path.join(outdir, base + " (reparado)" + ext)
+    i = 2
+    while os.path.exists(dst):
+        dst = os.path.join(outdir, f"{base} (reparado {i}){ext}")
+        i += 1
+    return dst
+
+
 def scan_and_repair_folder(outdir):
     """Revisa los videos de una carpeta y reempaqueta los que llevan un
     contenedor disfrazado (copia «(reparado)» junto al original, que no se
-    toca). Devuelve el reporte para mostrarlo en la app."""
-    report = {"ok": 0, "repaired": [], "broken": [], "failed": [], "codec_watch": [], "already": []}
+    toca). Devuelve el reporte para mostrarlo en la app. Si ffprobe no
+    responde en la máquina, el reporte lo dice (probe_error) en vez de
+    condenar todos los archivos como dañados."""
+    report = {"ok": 0, "repaired": [], "broken": [], "failed": [], "codec_watch": [],
+              "already": [], "probe_error": ""}
+    healthy, detail = probe_health()
+    if not healthy:
+        report["probe_error"] = detail
+        return report
     try:
         names = sorted(os.listdir(outdir))
     except OSError:
@@ -306,28 +425,47 @@ def scan_and_repair_folder(outdir):
         if os.path.splitext(name)[1].lower() not in VIDEO_EXTS:
             continue
         path = os.path.join(outdir, name)
+        try:
+            size = _fmt_size(os.path.getsize(path))
+        except OSError:
+            size = "?"
+        base, ext = os.path.splitext(name)
+        has_copy = any(n.startswith(base + " (reparado") for n in names)
         info = probe_media(path)
-        if info is None or not (info["duration"] > 0 and (info["vcodec"] or info["acodec"])):
-            report["broken"].append(name)
-            continue
-        if container_matches(path, info):
+        valid = info is not None and info["duration"] > 0 and (info["vcodec"] or info["acodec"])
+        if valid and container_matches(path, info):
             report["ok"] += 1
             if info["vcodec"] in ("av1", "vp9"):
                 report["codec_watch"].append(name)
             continue
-        base, ext = os.path.splitext(name)
-        if any(n.startswith(base + " (reparado") for n in names):
-            report["already"].append(name)  # ya tiene su copia sana: no duplicar
+        if valid:
+            # Contenedor disfrazado a plena vista (p. ej. MPEG-TS con nombre .mp4).
+            if has_copy:
+                report["already"].append(name)
+                continue
+            dst = _repaired_dst(outdir, name)
+            if repair_to(path, dst):
+                report["repaired"].append(os.path.basename(dst))
+            else:
+                report["failed"].append(name)
             continue
-        dst = os.path.join(outdir, base + " (reparado)" + ext)
-        i = 2
-        while os.path.exists(dst):
-            dst = os.path.join(outdir, f"{base} (reparado {i}){ext}")
-            i += 1
-        if repair_to(path, dst):
-            report["repaired"].append(os.path.basename(dst))
-        else:
-            report["failed"].append(name)
+        # ffprobe no lo abre: ¿es basura, o un stream íntegro tras una
+        # cabecera disfrazada (el truco PNG de Cuevana)? El olfato decide.
+        kind = sniff_kind(path)
+        if kind in ("ts", "ts-disfrazado"):
+            if has_copy:
+                report["already"].append(name)
+                continue
+            dst = _repaired_dst(outdir, name)
+            if repair_to(path, dst, deep=True):
+                report["repaired"].append(os.path.basename(dst) + " (venía con la cabecera disfrazada)")
+            else:
+                report["broken"].append(f"{name} ({size}) — huele a video íntegro tras una "
+                                        "cabecera falsa, pero ni escarbando se pudo abrir")
+            continue
+        seen = (f"formato «{info['format']}», duración {info['duration']:.0f} s"
+                if info else "ffprobe no devolvió nada")
+        report["broken"].append(f"{name} ({size}) — {seen}")
     return report
 
 

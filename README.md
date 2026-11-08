@@ -1,4 +1,4 @@
-# TurboDL — tu descargador estilo IDM (v1.3.7, con extensión)
+# TurboDL — tu descargador estilo IDM (v1.3.8, con extensión)
 
 Descargador de escritorio para Windows hecho en Python:
 

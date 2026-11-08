@@ -18,7 +18,7 @@ from engine import SegmentedDownloader, probe, format_bytes, format_eta  # noqa:
 import video as videomod  # noqa: E402
 from server import serve_in_thread, PORT as EXT_PORT  # noqa: E402
 
-APP_VERSION = "1.3.7"
+APP_VERSION = "1.3.8"
 try:
     import updater as updatermod
 except Exception:  # noqa: BLE001 — sin módulo de actualización, la app sigue
@@ -310,6 +310,17 @@ class TurboApp(tk.Tk):
 
     def _repair_report(self, report):
         from tkinter import messagebox
+        if report.get("probe_error"):
+            # Sin inspector no hay veredictos: decirlo claro en vez de
+            # marcar todos los archivos como dañados.
+            self.status.set("Reparar carpeta: el inspector de video (ffprobe) no responde.")
+            messagebox.showwarning(
+                "Reparar carpeta",
+                "OJO: el inspector de video (ffprobe) no respondió en esta PC:\n"
+                f"{report['probe_error']}\n\n"
+                "Sin él no puedo juzgar ningún archivo, así que no marco nada "
+                "como dañado. Avísale a Zevi con este mensaje.")
+            return
         lines = []
         if report["repaired"]:
             lines.append("Reparados (copia nueva junto al original, que no se toca):")
