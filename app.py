@@ -18,7 +18,7 @@ from engine import SegmentedDownloader, probe, format_bytes, format_eta  # noqa:
 import video as videomod  # noqa: E402
 from server import serve_in_thread, PORT as EXT_PORT  # noqa: E402
 
-APP_VERSION = "1.3.8"
+APP_VERSION = "1.3.9"
 try:
     import updater as updatermod
 except Exception:  # noqa: BLE001 — sin módulo de actualización, la app sigue
@@ -67,6 +67,13 @@ class TurboApp(tk.Tk):
         # Revisión silenciosa de actualizaciones: el botón solo aparece si hay.
         self._update_info = None
         threading.Thread(target=self._check_updates, daemon=True).start()
+        # Sin ffmpeg no hay conversión ni verificación: avisar y ofrecer la
+        # auto-reparación en vez de dejar que los videos salgan crudos.
+        if videomod.missing_tools():
+            self.ffmpeg_btn.pack(side="right", padx=3)
+            self.status.set("Falta ffmpeg junto al programa: sin él, los videos de stream "
+                            "bajan sin convertir y VLC los rechaza. Pulsa «Instalar ffmpeg» "
+                            "y TurboDL lo baja y se repara solo.")
 
     # ---------------- UI ----------------
     # ---------------- configuración persistente ----------------
@@ -158,6 +165,8 @@ class TurboApp(tk.Tk):
         # Botón de actualización: creado pero NO empaquetado; aparece solo
         # cuando el chequeo de arranque encuentra una versión más nueva.
         self.update_btn = ttk.Button(btns, text="", command=self._apply_update)
+        # Botón de auto-reparación: aparece solo si falta ffmpeg/ffprobe.
+        self.ffmpeg_btn = ttk.Button(btns, text="Instalar ffmpeg", command=self._install_ffmpeg)
 
         self.status = tk.StringVar(value="Listo. Pega un enlace de archivo o de video (YouTube, TikTok, etc.).")
         ttk.Label(self, textvariable=self.status, padding=(10, 4)).pack(fill="x", side="bottom")
@@ -414,6 +423,28 @@ class TurboApp(tk.Tk):
 
         self._ui(lambda: (self.status.set("Actualizado. Reiniciando TurboDL…"),
                           self.after(700, restart)))
+
+    # ---------------- ffmpeg: auto-reparación ----------------
+    def _install_ffmpeg(self):
+        self.ffmpeg_btn.configure(state="disabled")
+        self.status.set("Descargando ffmpeg… puede tardar según tu conexión.")
+        threading.Thread(target=self._install_ffmpeg_run, daemon=True).start()
+
+    def _install_ffmpeg_run(self):
+        def pct(p):
+            self._ui(lambda: self.status.set(f"Descargando ffmpeg… {p} %"))
+        ok, err = videomod.fetch_ffmpeg(APP_DIR, pct)
+        if ok:
+            def done():
+                self.ffmpeg_btn.pack_forget()
+                self.status.set(f"ffmpeg instalado en {APP_DIR}. Ya puedes pulsar "
+                                "«Reparar carpeta» para sanar los videos que VLC no abre.")
+            self._ui(done)
+        else:
+            def fail():
+                self.ffmpeg_btn.configure(state="normal")
+                self.status.set(f"No pude instalar ffmpeg: {err}")
+            self._ui(fail)
 
     # ---------------- trabajos desde la extensión ----------------
     def _ext_job(self, job):

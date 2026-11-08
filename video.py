@@ -231,6 +231,72 @@ def container_matches(path, info):
     return bool(set((info.get("format") or "").split(",")) & fam)
 
 
+FFMPEG_PACK_URLS = [
+    "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip",
+    "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip",
+]
+
+
+def missing_tools():
+    """Herramientas externas que el programa necesita y no encuentra.
+    Sin ffmpeg, yt-dlp deja los streams en su formato crudo (MPEG-TS con
+    nombre .mp4) que VLC rechaza; sin ffprobe no se puede verificar nada."""
+    miss = []
+    if not find_ffmpeg():
+        miss.append("ffmpeg")
+    if not _find_ffprobe():
+        miss.append("ffprobe")
+    return miss
+
+
+def fetch_ffmpeg(destdir, on_pct=None, urls=None):
+    """Auto-reparación: baja un paquete estático de ffmpeg para Windows y
+    deja ffmpeg.exe y ffprobe.exe en destdir (la carpeta del programa).
+    Devuelve (True, '') o (False, error legible)."""
+    import shutil
+    import urllib.request
+    import zipfile
+    tmp = os.path.join(destdir, "ffmpeg-pack.zip")
+    last_err = ""
+    for url in (urls or FFMPEG_PACK_URLS):
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 TurboDL"})
+            with urllib.request.urlopen(req, timeout=60) as r, open(tmp, "wb") as f:
+                total = int(r.headers.get("Content-Length") or 0)
+                done = 0
+                while True:
+                    chunk = r.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    f.write(chunk)
+                    done += len(chunk)
+                    if on_pct and total:
+                        on_pct(min(100, int(done * 100 / total)))
+            got = {}
+            with zipfile.ZipFile(tmp) as z:
+                for name in z.namelist():
+                    base = name.replace("\\", "/").rstrip("/").split("/")[-1]
+                    if base in ("ffmpeg.exe", "ffprobe.exe"):
+                        got[base] = name
+                if len(got) < 2:
+                    raise OSError("el paquete no traía ffmpeg.exe y ffprobe.exe")
+                for base, member in got.items():
+                    with z.open(member) as src, open(os.path.join(destdir, base), "wb") as out:
+                        shutil.copyfileobj(src, out, 1024 * 1024)
+            os.remove(tmp)
+            healthy, det = probe_health()
+            if healthy:
+                return True, ""
+            last_err = f"se instaló pero la comprobación falló ({det})"
+        except Exception as e:  # noqa: BLE001
+            last_err = str(e)
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
+    return False, last_err
+
+
 def probe_health():
     """¿Responde ffprobe en esta máquina? (ok, detalle). Sin él no hay
     veredictos: mejor decirlo que marcar archivos buenos como dañados."""
