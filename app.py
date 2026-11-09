@@ -18,7 +18,7 @@ from engine import SegmentedDownloader, probe, format_bytes, format_eta  # noqa:
 import video as videomod  # noqa: E402
 from server import serve_in_thread, PORT as EXT_PORT  # noqa: E402
 
-APP_VERSION = "1.3.11"
+APP_VERSION = "1.3.12"
 try:
     import updater as updatermod
 except Exception:  # noqa: BLE001 — sin módulo de actualización, la app sigue
@@ -126,7 +126,7 @@ class TurboApp(tk.Tk):
         ttk.Button(row2, text="Examinar…", command=self._pick_dir).grid(row=0, column=2)
         ttk.Label(row2, text="Segmentos:").grid(row=0, column=3, padx=(14, 4))
         self.seg_var = tk.IntVar(value=8)
-        ttk.Spinbox(row2, from_=1, to=16, width=4, textvariable=self.seg_var).grid(row=0, column=4)
+        ttk.Spinbox(row2, from_=1, to=32, width=4, textvariable=self.seg_var).grid(row=0, column=4)
         row2.columnconfigure(1, weight=1)
 
         row3 = ttk.Frame(self, padding=(10, 0, 10, 2))

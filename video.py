@@ -467,6 +467,28 @@ def repair_to(src, dst, deep=False):
     return ok
 
 
+def _try_rescue(path):
+    """Rescate por olfato: si los bytes dicen «hay un MPEG-TS» (limpio o tras
+    una cabecera disfrazada) aunque ffprobe solo viera el disfraz — un PNG
+    falso se lee como imagen de duración 0 —, se reempaqueta y se comprueba
+    que el resultado sí es un video de verdad antes de tocar el original."""
+    if sniff_kind(path) not in ("ts", "ts-disfrazado"):
+        return False
+    ext = os.path.splitext(path)[1]
+    tmp = path + ".turbodl-fixed" + ext
+    if not repair_to(path, tmp):
+        return False
+    info = probe_media(tmp)
+    if info and info["duration"] > 0 and (info["vcodec"] or info["acodec"]):
+        os.replace(tmp, path)
+        return True
+    try:
+        os.remove(tmp)
+    except OSError:
+        pass
+    return False
+
+
 def ensure_playable(path):
     """Veredicto sobre un archivo recién descargado:
     ("ok") el contenedor es el correcto · ("repaired") venía disfrazado
@@ -475,8 +497,12 @@ def ensure_playable(path):
     conversión automática falló · ("unknown") no se pudo inspeccionar."""
     info = probe_media(path)
     if info is None:
+        if _try_rescue(path):
+            return ("repaired", "")
         return ("unknown", "")
     if not (info["duration"] > 0 and (info["vcodec"] or info["acodec"])):
+        if _try_rescue(path):
+            return ("repaired", "")
         return ("invalid", "El archivo bajó pero NO es un video válido: el servidor "
                             "entregó un stream defectuoso. Prueba otra calidad u otro enlace.")
     if container_matches(path, info):
